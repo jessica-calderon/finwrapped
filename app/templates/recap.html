@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>FinWrapped</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: black;
+            color: white;
+            overflow: hidden;
+        }
+
+        .slide {
+            display: none;
+            height: 100vh;
+            width: 100vw;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            transition: opacity 0.5s ease;
+        }
+
+        .active {
+            display: flex;
+        }
+
+        h1 {
+            font-size: 3rem;
+            margin: 0;
+        }
+
+        .sub {
+            font-size: 1.5rem;
+            opacity: 0.7;
+            margin-top: 1rem;
+        }
+    </style>
+</head>
+<body>
+
+<div id="slides">
+    <div class="slide active">
+        <h1>Your {{ year }} Recap</h1>
+        <p class="sub">FinWrapped</p>
+    </div>
+
+    <div class="slide">
+        <h1 id="hours">0 hours</h1>
+        <p class="sub">watched this year</p>
+    </div>
+
+    <div class="slide">
+        <h1 id="topMovie">Top Movie</h1>
+        <p class="sub">most watched</p>
+    </div>
+
+    <div class="slide">
+        <h1 id="topShow">Top Show</h1>
+        <p class="sub">your favorite series</p>
+    </div>
+
+    <div class="slide">
+        <h1 id="activeDay">Saturday</h1>
+        <p class="sub">your most active day</p>
+    </div>
+
+    <div class="slide">
+        <h1>That’s your year</h1>
+        <p class="sub">see you next time</p>
+    </div>
+</div>
+
+<script>
+let current = 0;
+const slides = document.querySelectorAll(".slide");
+
+fetch(`/api/recap/{{ year }}`)
+    .then((res) => res.json())
+    .then((data) => {
+        document.getElementById("hours").innerText =
+            Math.round(data.total_hours) + " hours";
+
+        document.getElementById("topMovie").innerText =
+            data.top_movies?.[0]?.name || "No data";
+
+        document.getElementById("topShow").innerText =
+            data.top_shows?.[0]?.name || "No data";
+
+        document.getElementById("activeDay").innerText =
+            data.most_active_day || "Unknown";
+    });
+
+document.body.addEventListener("click", () => {
+    slides[current].classList.remove("active");
+    current = (current + 1) % slides.length;
+    slides[current].classList.add("active");
+});
+</script>
+
+</body>
+</html>
