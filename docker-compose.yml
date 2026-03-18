@@ -1,0 +1,12 @@
+version: "3.8"
+
+services:
+  finwrapped:
+    build: .
+    container_name: finwrapped
+    ports:
+      - "8091:8090"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
