@@ -4,9 +4,8 @@ from collections import Counter
 from datetime import UTC, datetime
 from typing import Any, Mapping
 
-from app.core.config import settings
-from app.services.jellyfin_client import client
-from app.services.playback_db import get_playback_events as get_db_playback_events
+from app.services.data_source import get_playback_events as get_source_playback_events
+from app.services.time_ranges import ResolvedTimeWindow, format_time_range_label, resolve_time_window
 
 logger = logging.getLogger(__name__)
 
@@ -14,25 +13,44 @@ _BINGE_GAP_MINUTES = 30
 _TOP_LIMIT = 10
 
 
-def get_basic_stats(year: int, user_id: str | None = None) -> dict[str, Any]:
+def get_basic_stats(
+    year: int | None = None,
+    user_id: str | None = None,
+    config: Mapping[str, Any] | None = None,
+    jellyfin_client: Any | None = None,
+    range_key: str | None = None,
+) -> dict[str, Any]:
     """Backward-compatible entrypoint used by the current routes."""
 
-    return build_recap(year, user_id)
+    return build_recap(year, user_id, config, jellyfin_client, range_key)
 
 
-def build_recap(year: int, user_id: str | None = None) -> dict[str, Any]:
-    """Generate the recap payload for a given year and optional user."""
+def build_recap(
+    year: int | None = None,
+    user_id: str | None = None,
+    config: Mapping[str, Any] | None = None,
+    jellyfin_client: Any | None = None,
+    range_key: str | None = None,
+) -> dict[str, Any]:
+    """Generate the recap payload for a given time window and optional user."""
 
-    events = _load_playback_events(year, user_id)
-    normalized_events = [event for event in (_normalize_event(item, year, user_id) for item in events) if event]
+    resolved_window = resolve_time_window(year, range_key)
+    events = _load_playback_events(resolved_window, user_id, config, jellyfin_client)
+    normalized_events = [
+        event
+        for event in (_normalize_event(item, resolved_window, user_id) for item in events)
+        if event
+    ]
 
     total_hours = round(
-        sum(event["duration_seconds"] * event["play_count"] for event in normalized_events) / 3600,
+        sum(event["duration"] for event in normalized_events) / 3600,
         2,
     )
 
     return {
-        "year": year,
+        "year": resolved_window.year,
+        "range": resolved_window.key,
+        "range_label": resolved_window.label,
         "user": user_id,
         "total_hours": total_hours,
         "top_movies": _top_items(normalized_events, kind="movie"),
@@ -43,52 +61,43 @@ def build_recap(year: int, user_id: str | None = None) -> dict[str, Any]:
     }
 
 
-def _load_playback_events(year: int, user_id: str | None) -> list[dict[str, Any]]:
-    data_mode = settings.DATA_MODE.strip().lower()
-
-    if data_mode == "hybrid":
-        try:
-            events = get_db_playback_events(year, user_id)
-            if events:
-                return events
-        except Exception as exc:  # noqa: BLE001 - fallback is intentional
-            logger.warning("SQLite playback lookup failed, falling back to API: %s", exc)
-
+def _load_playback_events(
+    window: ResolvedTimeWindow,
+    user_id: str | None,
+    config: Mapping[str, Any] | None = None,
+    jellyfin_client: Any | None = None,
+) -> list[dict[str, Any]]:
     try:
-        return client.get_playback_activity(year, user_id)
+        return get_source_playback_events(window.year, user_id, config, window.key)
     except Exception as exc:  # noqa: BLE001 - safe fallback
         logger.warning("Playback lookup failed: %s", exc)
         return []
 
 
-def _normalize_event(item: Mapping[str, Any], year: int, user_id: str | None) -> dict[str, Any] | None:
-    timestamp = _parse_timestamp(item.get("timestamp"))
-    if not timestamp or timestamp.year != year:
+def _normalize_event(
+    item: Mapping[str, Any],
+    window: ResolvedTimeWindow,
+    user_id: str | None,
+) -> dict[str, Any] | None:
+    timestamp = _parse_timestamp(item.get("played_at") or item.get("timestamp"))
+    if not timestamp:
+        return None
+    if window.start is not None and timestamp < window.start:
+        return None
+    if window.end is not None and timestamp >= window.end:
         return None
 
     event_user = _clean_text(item.get("user_id")) or user_id
-    title = _clean_text(item.get("title")) or "Unknown title"
-    series_title = _clean_text(item.get("series_title"))
-    item_type = _normalize_item_type(item.get("item_type"), title, series_title)
-    duration_seconds = max(0.0, _coerce_float(item.get("duration_seconds")))
-    play_count = max(1, _coerce_int(item.get("play_count") or 1))
-
-    if item_type == "show":
-        series_title = title or series_title or "Unknown show"
-        title = series_title
-    elif item_type == "episode":
-        series_title = series_title or "Unknown show"
-    else:
-        series_title = None
+    title = _clean_text(item.get("item_name") or item.get("title") or item.get("name")) or "Unknown title"
+    item_type = _normalize_item_type(item.get("item_type"), title, None)
+    duration_seconds = max(0, _coerce_int(item.get("duration") or item.get("duration_seconds") or 0))
 
     return {
-        "timestamp": timestamp,
+        "played_at": timestamp,
         "user_id": event_user,
-        "title": title,
-        "series_title": series_title,
+        "item_name": title,
         "item_type": item_type,
-        "duration_seconds": duration_seconds,
-        "play_count": play_count,
+        "duration": duration_seconds,
     }
 
 
@@ -98,13 +107,13 @@ def _top_items(events: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
     for event in events:
         if kind == "movie" and event["item_type"] != "movie":
             continue
-        if kind == "show" and event["item_type"] not in {"episode", "show"}:
+        if kind == "show" and event["item_type"] != "episode":
             continue
 
-        key = event["title"] if kind == "movie" else event["series_title"] or event["title"]
+        key = event["item_name"]
         if not key:
             continue
-        counts[key] += event["play_count"]
+        counts[key] += 1
 
     items = sorted(counts.items(), key=lambda entry: (-entry[1], entry[0].lower()))
     return [{"title": title, "play_count": play_count} for title, play_count in items[:_TOP_LIMIT]]
@@ -113,7 +122,7 @@ def _top_items(events: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
 def _most_active_day(events: list[dict[str, Any]]) -> str:
     counts: Counter[int] = Counter()
     for event in events:
-        counts[event["timestamp"].weekday()] += event["play_count"]
+        counts[event["played_at"].weekday()] += 1
     if not counts:
         return ""
     return calendar.day_name[counts.most_common(1)[0][0]]
@@ -122,7 +131,7 @@ def _most_active_day(events: list[dict[str, Any]]) -> str:
 def _most_active_hour(events: list[dict[str, Any]]) -> int:
     counts: Counter[int] = Counter()
     for event in events:
-        counts[event["timestamp"].hour] += event["play_count"]
+        counts[event["played_at"].hour] += 1
     if not counts:
         return 0
     return counts.most_common(1)[0][0]
@@ -137,8 +146,8 @@ def _count_binge_sessions(events: list[dict[str, Any]]) -> int:
     previous_timestamp: datetime | None = None
     gap = _BINGE_GAP_MINUTES * 60
 
-    for event in sorted(events, key=lambda entry: entry["timestamp"]):
-        timestamp = event["timestamp"]
+    for event in sorted(events, key=lambda entry: entry["played_at"]):
+        timestamp = event["played_at"]
         if previous_timestamp is None or (timestamp - previous_timestamp).total_seconds() <= gap:
             current_session.append(event)
         else:
@@ -157,15 +166,13 @@ def _normalize_item_type(raw_type: Any, title: str | None, series_title: str | N
     normalized = str(raw_type or "").strip().lower()
     if normalized in {"movie", "feature", "video"}:
         return "movie"
-    if normalized in {"episode", "episodeitem"}:
+    if normalized in {"episode", "episodeitem", "series", "show"}:
         return "episode"
-    if normalized in {"series", "show"}:
-        return "show"
     if series_title and title and series_title != title:
         return "episode"
     if series_title and not title:
-        return "show"
-    return "movie" if title else "unknown"
+        return "episode"
+    return "movie" if title else "episode"
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
@@ -224,3 +231,7 @@ def _coerce_int(value: Any) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return 0
+
+
+def get_time_range_label(year: int | None = None, range_key: str | None = None) -> str:
+    return format_time_range_label(year, range_key)

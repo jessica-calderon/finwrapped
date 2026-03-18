@@ -2,29 +2,32 @@ import { useEffect, useState } from "react";
 import RecapSlides from "./RecapSlides.jsx";
 import ThemeToggle from "./ThemeToggle.jsx";
 import UserSelector from "./UserSelector.jsx";
+import TimeRangeSelector, { TIME_RANGES } from "./TimeRangeSelector.jsx";
+import { buildApiHeaders, requestJson } from "../apiClient.js";
 
-const year = 2026;
 const slideDurationMs = 3500;
-const apiBaseUrl = "http://localhost:8090";
 
-const emptyRecap = {
-  year,
-  user: null,
-  total_hours: 0,
-  top_movies: [],
-  top_shows: [],
-  most_active_day: "",
-  most_active_hour: 0,
-  binge_sessions: 0,
-};
+function getRangeLabel(rangeKey) {
+  return TIME_RANGES.find((range) => range.key === rangeKey)?.label || "Last 30 days";
+}
 
-function fetchJson(path, options) {
-  return fetch(`${apiBaseUrl}${path}`, options).then(async (response) => {
-    if (!response.ok) {
-      throw new Error(`Request failed with status ${response.status}`);
-    }
+function createEmptyRecap(recapRange) {
+  return {
+    range: recapRange,
+    user: null,
+    total_hours: 0,
+    top_movies: [],
+    top_shows: [],
+    most_active_day: "",
+    most_active_hour: 0,
+    binge_sessions: 0,
+  };
+}
 
-    return response.json();
+function fetchJson(path, config, options = {}) {
+  return requestJson(path, {
+    ...options,
+    headers: buildApiHeaders(config, options.headers || {}),
   });
 }
 
@@ -95,7 +98,7 @@ function createTheme(background, accent, accentSoft, glow, accentStrong) {
   };
 }
 
-function buildSlides(data) {
+function buildSlides(data, recapRangeLabel, selectedUserLabel) {
   const totalHours = Math.round(Number(data?.total_hours) || 0);
   const topMovie = data?.top_movies?.[0];
   const topShow = data?.top_shows?.[0];
@@ -109,8 +112,11 @@ function buildSlides(data) {
     {
       id: "intro",
       label: "FinWrapped",
-      title: `Your ${year} Wrapped`,
-      subtitle: "A year of play history, remixed into a story worth sharing.",
+      title: `Your ${recapRangeLabel} Wrapped`,
+      subtitle:
+        selectedUserLabel === "All Users"
+          ? `A cinematic recap for the whole server over ${recapRangeLabel.toLowerCase()}.`
+          : `A cinematic recap for ${selectedUserLabel} over ${recapRangeLabel.toLowerCase()}.`,
       theme: createTheme(
         "linear-gradient(135deg, #0f172a 0%, #111827 50%, #020617 100%)",
         "#7CFFB2",
@@ -123,7 +129,7 @@ function buildSlides(data) {
       id: "watch-time",
       label: "Big number",
       title: `${totalHours} hours`,
-      subtitle: "watched this year",
+      subtitle: `watched during ${recapRangeLabel.toLowerCase()}`,
       theme: createTheme(
         "linear-gradient(135deg, #312e81 0%, #1f1147 58%, #09090b 100%)",
         "#f5d0fe",
@@ -199,7 +205,7 @@ function buildSlides(data) {
     {
       id: "outro",
       label: "See you next time",
-      title: "That’s your year",
+      title: "That’s your time window",
       subtitle: "Replay the highlights any time.",
       theme: createTheme(
         "linear-gradient(135deg, #111827 0%, #14532d 58%, #020617 100%)",
@@ -212,7 +218,7 @@ function buildSlides(data) {
   ];
 }
 
-function buildEmptySlides(selectedUserLabel) {
+function buildEmptySlides(selectedUserLabel, recapRangeLabel) {
   const targetLabel =
     selectedUserLabel === "All Users" ? "this story" : `${selectedUserLabel}'s story`;
 
@@ -220,7 +226,7 @@ function buildEmptySlides(selectedUserLabel) {
     {
       id: "empty-intro",
       label: "FinWrapped",
-      title: "Your story is just getting started",
+      title: `Your ${recapRangeLabel} Wrapped is just getting started`,
       subtitle: "Watch more to unlock your recap.",
       theme: createTheme(
         "linear-gradient(135deg, #0f172a 0%, #111827 55%, #020617 100%)",
@@ -246,9 +252,16 @@ function buildEmptySlides(selectedUserLabel) {
   ];
 }
 
-export default function WrappedApp({ theme, onThemeChange }) {
+export default function WrappedApp({
+  theme,
+  onThemeChange,
+  config,
+  onEditSettings,
+  isSettingsOpen = false,
+}) {
   const [users, setUsers] = useState([]);
   const [selectedUser, setSelectedUser] = useState("all");
+  const [selectedRange, setSelectedRange] = useState("30d");
   const [recapData, setRecapData] = useState(null);
   const [usersLoading, setUsersLoading] = useState(true);
   const [recapLoading, setRecapLoading] = useState(true);
@@ -259,7 +272,7 @@ export default function WrappedApp({ theme, onThemeChange }) {
 
     async function loadUsers() {
       try {
-        const data = await fetchJson("/api/users");
+        const data = await fetchJson("/api/users", config);
         if (active) {
           setUsers(Array.isArray(data) ? data : []);
         }
@@ -279,7 +292,7 @@ export default function WrappedApp({ theme, onThemeChange }) {
     return () => {
       active = false;
     };
-  }, []);
+  }, [config]);
 
   useEffect(() => {
     let active = true;
@@ -291,17 +304,17 @@ export default function WrappedApp({ theme, onThemeChange }) {
     async function loadRecap() {
       const path =
         selectedUser === "all"
-          ? `/api/recap/${year}`
-          : `/api/recap/${year}/user/${selectedUser}`;
+          ? `/api/recap?range=${encodeURIComponent(selectedRange)}`
+          : `/api/recap/user/${selectedUser}?range=${encodeURIComponent(selectedRange)}`;
 
       try {
-        const data = await fetchJson(path);
+        const data = await fetchJson(path, config);
         if (active) {
           setRecapData(data);
         }
       } catch {
         if (active) {
-          setRecapData(emptyRecap);
+          setRecapData(createEmptyRecap(selectedRange));
         }
       } finally {
         if (active) {
@@ -315,17 +328,22 @@ export default function WrappedApp({ theme, onThemeChange }) {
     return () => {
       active = false;
     };
-  }, [selectedUser]);
+  }, [config, selectedRange, selectedUser]);
 
   const selectedUserLabel = getUserLabel(users, selectedUser);
+  const selectedRangeLabel = getRangeLabel(selectedRange);
   const slides = isEmptyRecap(recapData)
-    ? buildEmptySlides(selectedUserLabel)
-    : buildSlides(recapData);
+    ? buildEmptySlides(selectedUserLabel, selectedRangeLabel)
+    : buildSlides(recapData, selectedRangeLabel, selectedUserLabel);
   const activeSlide = slides[slideIndex] || slides[0];
   const slideCount = slides.length;
   const isLoading = usersLoading || recapLoading;
 
   useEffect(() => {
+    if (isSettingsOpen) {
+      return undefined;
+    }
+
     function handleKeyDown(event) {
       if (
         event.target &&
@@ -348,7 +366,7 @@ export default function WrappedApp({ theme, onThemeChange }) {
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [slideCount]);
+  }, [isSettingsOpen, slideCount]);
 
   useEffect(() => {
     if (slideIndex >= slides.length) {
@@ -357,7 +375,7 @@ export default function WrappedApp({ theme, onThemeChange }) {
   }, [slideIndex, slides.length]);
 
   useEffect(() => {
-    if (isLoading || slides.length <= 1) {
+    if (isLoading || slides.length <= 1 || isSettingsOpen) {
       return undefined;
     }
 
@@ -366,7 +384,7 @@ export default function WrappedApp({ theme, onThemeChange }) {
     }, slideDurationMs);
 
     return () => window.clearTimeout(timeout);
-  }, [isLoading, slideIndex, slides.length]);
+  }, [isLoading, isSettingsOpen, slideIndex, slides.length]);
 
   if (isLoading) {
     return (
@@ -386,20 +404,29 @@ export default function WrappedApp({ theme, onThemeChange }) {
 
   return (
     <main
-      className="wrapped-app"
+      className={`wrapped-app${isSettingsOpen ? " is-settings-open" : ""}`}
       style={{ "--slide-duration": `${slideDurationMs}ms` }}
+      aria-hidden={isSettingsOpen}
     >
       <header className="wrapped-topbar">
         <div className="wrapped-brand">
           <p className="wrapped-kicker">FinWrapped</p>
           <p className="wrapped-brand-copy">
             {selectedUserLabel === "All Users"
-              ? "A cinematic recap for the whole server."
-              : `A cinematic recap for ${selectedUserLabel}.`}
+              ? `A cinematic recap for the whole server in ${selectedRangeLabel}.`
+              : `A cinematic recap for ${selectedUserLabel} in ${selectedRangeLabel}.`}
           </p>
         </div>
         <div className="wrapped-topbar__actions">
           <ThemeToggle theme={theme} onChange={onThemeChange} />
+          <button type="button" className="wrapped-settings-button" onClick={onEditSettings}>
+            Edit settings
+          </button>
+          <TimeRangeSelector
+            ranges={TIME_RANGES}
+            selectedRange={selectedRange}
+            onSelect={setSelectedRange}
+          />
           <UserSelector
             users={users}
             selectedUser={selectedUser}

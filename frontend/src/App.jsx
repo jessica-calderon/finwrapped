@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import Onboarding from "./components/Onboarding.jsx";
+import SettingsPanel from "./components/SettingsPanel.jsx";
 import WrappedApp from "./components/WrappedApp.jsx";
+import { getConfig, getOnboarded, setOnboarded } from "./ConfigService.js";
 
 const themeStorageKey = "finwrapped_theme";
-const onboardedStorageKey = "finwrapped_onboarded";
 
 function readStoredTheme() {
   if (typeof window === "undefined") {
@@ -19,7 +20,15 @@ function readStoredOnboarded() {
     return false;
   }
 
-  return window.localStorage.getItem(onboardedStorageKey) === "true";
+  return getOnboarded();
+}
+
+function readStoredConfig() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  return getConfig();
 }
 
 function applyTheme(theme) {
@@ -33,7 +42,12 @@ function applyTheme(theme) {
 
 export default function App() {
   const [theme, setTheme] = useState(readStoredTheme);
-  const [isOnboarded, setIsOnboarded] = useState(readStoredOnboarded);
+  const [config, setConfig] = useState(readStoredConfig);
+  const [isOnboarded, setIsOnboarded] = useState(() => {
+    const storedConfig = readStoredConfig();
+    return Boolean(storedConfig && readStoredOnboarded());
+  });
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   useEffect(() => {
     applyTheme(theme);
@@ -49,25 +63,54 @@ export default function App() {
   }
 
   function handleOnboardingComplete() {
-    try {
-      window.localStorage.setItem(onboardedStorageKey, "true");
-    } catch {
-      // Ignore storage failures so the UI still renders.
-    }
+    setOnboarded(true);
     setIsOnboarded(true);
+    setIsSettingsOpen(false);
+  }
+
+  function handleSettingsEdit() {
+    setIsSettingsOpen(true);
+  }
+
+  function handleSettingsClose() {
+    setIsSettingsOpen(false);
+  }
+
+  function handleSettingsSave(savedConfig) {
+    setConfig(savedConfig);
+    setIsSettingsOpen(false);
   }
 
   return (
     <div className={`finwrapped-shell theme-${theme}`}>
       {isOnboarded ? (
-        <WrappedApp theme={theme} onThemeChange={handleThemeChange} />
+        <WrappedApp
+          theme={theme}
+          onThemeChange={handleThemeChange}
+          config={config}
+          onEditSettings={handleSettingsEdit}
+          isSettingsOpen={isSettingsOpen}
+        />
       ) : (
         <Onboarding
           theme={theme}
           onThemeChange={handleThemeChange}
-          onComplete={handleOnboardingComplete}
+          initialConfig={config}
+          onComplete={(savedConfig) => {
+            setConfig(savedConfig);
+            handleOnboardingComplete();
+          }}
         />
       )}
+      {isOnboarded && isSettingsOpen ? (
+        <SettingsPanel
+          theme={theme}
+          onThemeChange={handleThemeChange}
+          config={config}
+          onClose={handleSettingsClose}
+          onSave={handleSettingsSave}
+        />
+      ) : null}
     </div>
   );
 }

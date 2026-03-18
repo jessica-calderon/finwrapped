@@ -2,24 +2,25 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.services.jellyfin_client import client
+from app.services.jellyfin_client import JellyfinClient, client as default_client
 
 
-def list_users() -> list[dict[str, str]]:
+def list_users(jellyfin_client: JellyfinClient | None = None) -> list[dict[str, str]]:
     """Return a sanitized list of Jellyfin users."""
 
+    active_client = jellyfin_client or default_client
     users: list[dict[str, str]] = []
-    for raw_user in client.get_users():
+    for raw_user in active_client.get_users():
         user = _normalize_user(raw_user)
         if user is not None:
             users.append(user)
     return users
 
 
-def get_user(user_id: str) -> dict[str, str] | None:
+def get_user(user_id: str, jellyfin_client: JellyfinClient | None = None) -> dict[str, str] | None:
     """Return a sanitized Jellyfin user by id, if it exists."""
 
-    for user in list_users():
+    for user in list_users(jellyfin_client):
         if user["id"] == user_id:
             return user
     return None

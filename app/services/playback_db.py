@@ -42,7 +42,7 @@ _DURATION_COLUMNS = ("Duration", "DurationSeconds", "WatchedSeconds", "PlayDurat
 _PLAYCOUNT_COLUMNS = ("PlayCount", "play_count", "Count")
 
 
-def get_playback_events(year: int, user_id: str | None = None) -> list[dict[str, Any]]:
+def get_events(year: int | None = None, user_id: str | None = None) -> list[dict[str, Any]]:
     """
     Read playback rows from the SQLite reporting database and normalize them.
 
@@ -66,7 +66,13 @@ def get_playback_events(year: int, user_id: str | None = None) -> list[dict[str,
         return []
 
 
-def _collect_events(connection: sqlite3.Connection, year: int, user_id: str | None) -> list[dict[str, Any]]:
+def get_playback_events(year: int | None = None, user_id: str | None = None) -> list[dict[str, Any]]:
+    """Backward-compatible wrapper for existing callers."""
+
+    return get_events(year, user_id)
+
+
+def _collect_events(connection: sqlite3.Connection, year: int | None, user_id: str | None) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
 
     for table_name in _candidate_tables(connection):
@@ -78,7 +84,7 @@ def _collect_events(connection: sqlite3.Connection, year: int, user_id: str | No
         normalized_rows = _fetch_table_rows(connection, table_name, columns, timestamp_column, year, user_id)
         events.extend(normalized_rows)
 
-    events.sort(key=lambda event: event["timestamp"])
+    events.sort(key=lambda event: event["played_at"])
     return events
 
 
@@ -114,7 +120,7 @@ def _fetch_table_rows(
     table_name: str,
     columns: list[str],
     timestamp_column: str,
-    year: int,
+    year: int | None,
     user_id: str | None,
 ) -> list[dict[str, Any]]:
     user_column = _pick_column(columns, _USER_COLUMNS)
@@ -138,7 +144,7 @@ def _fetch_table_rows(
     params: list[Any] = []
 
     sample_value = _sample_timestamp(connection, table_name, timestamp_column)
-    window_clause, window_params, filterable = _year_window(timestamp_column, sample_value, year)
+    window_clause, window_params, filterable = _time_window(timestamp_column, sample_value, year)
     if filterable:
         where_clauses.append(window_clause)
         params.extend(window_params)
@@ -154,26 +160,28 @@ def _fetch_table_rows(
     normalized: list[dict[str, Any]] = []
 
     for row in rows:
-        event = _normalize_row(
-            row,
-            timestamp_column=timestamp_column,
-            user_column=user_column,
-            title_column=title_column,
-            series_column=series_column,
-            type_column=type_column,
-            duration_column=duration_column,
-            playcount_column=playcount_column,
-            year=year,
-            user_id=user_id,
+        normalized.extend(
+            _normalize_row(
+                row,
+                timestamp_column=timestamp_column,
+                user_column=user_column,
+                title_column=title_column,
+                series_column=series_column,
+                type_column=type_column,
+                duration_column=duration_column,
+                playcount_column=playcount_column,
+                year=year,
+                user_id=user_id,
+            )
         )
-        if event:
-            normalized.append(event)
 
     if filterable:
         return normalized
 
     # Some schemas store timestamps in formats that SQLite cannot filter directly.
-    return [event for event in normalized if event["timestamp"].year == year]
+    if year is None:
+        return normalized
+    return [event for event in normalized if event["played_at"].year == year]
 
 
 def _sample_timestamp(connection: sqlite3.Connection, table_name: str, timestamp_column: str) -> Any:
@@ -185,7 +193,10 @@ def _sample_timestamp(connection: sqlite3.Connection, table_name: str, timestamp
     return row[0]
 
 
-def _year_window(column: str, sample_value: Any, year: int) -> tuple[str, list[Any], bool]:
+def _time_window(column: str, sample_value: Any, year: int | None) -> tuple[str, list[Any], bool]:
+    if year is None:
+        return "", [], False
+
     start = datetime(year, 1, 1, tzinfo=UTC)
     end = datetime(year + 1, 1, 1, tzinfo=UTC)
 
@@ -217,39 +228,36 @@ def _normalize_row(
     type_column: str | None,
     duration_column: str | None,
     playcount_column: str | None,
-    year: int,
+    year: int | None,
     user_id: str | None,
-) -> dict[str, Any] | None:
+) -> list[dict[str, Any]]:
     timestamp = _parse_timestamp(row[timestamp_column])
-    if not timestamp or timestamp.year != year:
-        return None
+    if not timestamp or (year is not None and timestamp.year != year):
+        return []
 
     event_user_id = _string_value(row[user_column]) if user_column else user_id
     if user_id and event_user_id != user_id:
-        return None
+        return []
 
     title = _clean_text(_string_value(row[title_column]) if title_column else None)
     series_title = _clean_text(_string_value(row[series_column]) if series_column else None)
     media_type = _normalize_media_type(_string_value(row[type_column]) if type_column else None, title, series_title)
-    duration_seconds = _coerce_duration_seconds(row[duration_column]) if duration_column else 0.0
+    duration_seconds = int(round(_coerce_duration_seconds(row[duration_column]))) if duration_column else 0
     play_count = max(1, _coerce_int(row[playcount_column])) if playcount_column else 1
 
     resolved_title = title or series_title or "Unknown title"
-    resolved_series = series_title if media_type == "episode" else None
-    if media_type == "show":
-        resolved_series = title or series_title or "Unknown show"
-        resolved_title = resolved_series
+    item_type = "movie" if media_type == "movie" else "episode"
 
-    return {
-        "timestamp": timestamp,
-        "user_id": event_user_id,
-        "title": resolved_title,
-        "series_title": resolved_series,
-        "item_type": media_type,
-        "duration_seconds": duration_seconds,
-        "play_count": play_count,
-        "source": "sqlite",
-    }
+    return [
+        {
+            "user_id": event_user_id,
+            "item_name": resolved_title,
+            "item_type": item_type,
+            "played_at": timestamp,
+            "duration": duration_seconds,
+        }
+        for _ in range(play_count)
+    ]
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
@@ -309,12 +317,12 @@ def _normalize_media_type(raw_type: str | None, title: str | None, series_title:
     if normalized in {"episode", "episodeitem"}:
         return "episode"
     if normalized in {"series", "show"}:
-        return "show"
+        return "episode"
     if series_title and title and series_title != title:
         return "episode"
     if series_title and not title:
-        return "show"
-    return "movie" if title else "unknown"
+        return "episode"
+    return "movie" if title else "episode"
 
 
 def _coerce_int(value: Any) -> int:
